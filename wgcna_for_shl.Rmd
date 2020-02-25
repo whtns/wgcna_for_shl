@@ -1,0 +1,481 @@
+---
+title: "WGCNA Tutorial"
+output:
+  html_document:
+    keep_md: true
+    code_folding: hide
+---
+
+```{r setup, echo = F}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r load-packages}
+library(glue)
+library(fs)
+library(rprojroot)
+library(tidyverse)
+library(seuratTools)
+library(WGCNA)
+enableWGCNAThreads()
+library(cluster)
+# library(here)
+proj_dir = rprojroot::find_root(criterion = has_file_pattern("*.Rproj"))
+```
+
+# load seurat object
+
+```{r}
+seu <- load_seurat_from_proj(proj_dir)
+```
+
+# 02 load data from file
+
+```{r}
+
+datTraits=seu$gene[[]]
+rownames(datTraits) <- stringr::str_replace_all(rownames(datTraits), "-", ".")
+datTraits$sample_id <- stringr::str_replace_all(datTraits$sample_id, "-", ".")
+
+datExpression=GetAssayData(seu$gene, "counts")
+```
+
+
+```{r}
+# This vector contains the cell names
+sample_id= names(data.frame(datExpression[,-1]))
+ # This vector contains the gene names
+GeneName= rownames(datExpression)
+
+# We transpose the data so that the rows correspond to samples and the columns correspond to genes
+# Since the first column contains the gene names, we exclude it.
+datExpr=data.frame(t(as.matrix(datExpression)))
+names(datExpr)=datExpression[,1]
+dimnames(datExpr)[[1]]=names(data.frame(datExpression))
+
+```
+
+
+```{r}
+
+# First, make sure that the array names in the file datTraits line up with those in the microarray data 
+table( dimnames(datExpr)[[1]]==datTraits$sample_id)
+# Next, define the microarray sample trait 
+y=datTraits$custom_cluster
+```
+
+# 03 data processing
+
+
+```{r}
+
+meanExpressionByCell=apply( datExpr,1,mean, na.rm=T)  
+NumberMissingByCell=apply( is.na(data.frame(datExpr)),1, sum)
+```
+
+
+```{r}
+
+sizeGrWindow(9, 5)
+barplot(meanExpressionByCell,
+        xlab = "Sample", ylab = "Mean expression",
+        main ="Mean expression across samples",
+        names.arg = names(meanExpressionByCell), cex.names = 0.7)
+```
+
+
+```{r, echo = FALSE}
+
+# Keep only Cells containing less than 500 missing entries
+KeepCell= NumberMissingByCell<500
+table(KeepCell)
+datExpr=datExpr[KeepCell,]
+y=y[KeepCell]
+sample_id[KeepCell]
+```
+
+
+```{r}
+
+NumberMissingByGene =apply( is.na(data.frame(datExpr)),2, sum)
+# One could do a barplot(NumberMissingByGene), but the barplot is empty in this case.
+# It may be better to look at the numbers of missing samples using the summary method:
+summary(NumberMissingByGene)
+# Calculate the variances of the probes and the number of present entries
+variancedatExpr=as.vector(apply(as.matrix(datExpr),2,var, na.rm=T))
+no.presentdatExpr=as.vector(apply(!is.na(as.matrix(datExpr)),2, sum) )
+# Another way of summarizing the number of pressent entries
+table(no.presentdatExpr)
+
+# Keep only genes whose variance is non-zero and have at least 4 present entries
+KeepGenes= variancedatExpr>0 & no.presentdatExpr>=4
+table(KeepGenes)
+
+```
+
+```{r}
+
+datExpr=datExpr[, KeepGenes]
+GeneName=GeneName[KeepGenes]
+```
+
+
+```{r, eval = FALSE}
+
+sizeGrWindow(9, 5)
+plotClusterTreeSamples(datExpr=datExpr, y=y)
+```
+
+# 04 gene screening
+
+```{r}
+
+GS1= as.numeric(cor(y, datExpr, use="p"))
+# Network terminology: GS1 will be referred to as signed gene significance measure
+p.Standard=corPvalueFisher(GS1, nSamples =length(y) )
+# since the q-value function has problems with missing data, we use the following trick
+p.Standard2=p.Standard
+p.Standard2[is.na(p.Standard)]=1
+q.Standard=qvalue(p.Standard2)$qvalues
+# Form a data frame to hold the results
+StandardGeneScreeningResults=data.frame(GeneName,PearsonCorrelation=GS1, p.Standard, q.Standard)
+```
+
+
+
+```{r}
+
+table(q.Standard<.20)
+```
+
+
+
+# 05a blockwise constructin of WGCN and modules
+
+```{r, eval = TRUE}
+
+net <- blockwiseModules(datExpr, power = 6,
+                       maxBlockSize = 10000,
+                       TOMType = "unsigned", minModuleSize = 35,
+                       reassignThreshold = 0, mergeCutHeight = 0.45,
+                       numericLabels = TRUE, pamRespectsDendro = FALSE,
+                       saveTOMs = TRUE,
+                       saveTOMFileBase = "shlTOM", 
+                       loadTOM = TRUE,
+                       verbose = 3)
+
+```
+
+```{r}
+moduleLabels = net$colors
+moduleColors = labels2colors(net$colors)
+
+plotDendroAndColors(net$dendrograms[[1]], moduleColors[net$blockGenes[[1]]],
+                    "Module colors", main = "Gene dendrogram and module colors in block 1", 
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+```
+
+```{r}
+purrr::map2(net$dendrograms, net$blockGenes, 
+            ~plotDendroAndColors(.x, moduleColors[.y],
+               "Module colors", main = "Gene dendrogram and module colors in block", 
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05                   
+              
+            ))
+
+```
+
+# end of reliable code -------------------------------------
+
+# 06 relating modules and eigengenes to external data
+
+```{r}
+#=====================================================================================
+#
+#  Code chunk 1
+#
+#=====================================================================================
+
+# Define numbers of genes and samples
+nGenes = ncol(datExpr);
+nSamples = nrow(datExpr);
+# Recalculate MEs with color labels
+MEs0 = moduleEigengenes(datExpr, moduleColors)$eigengenes
+MEs = orderMEs(MEs0)
+moduleTraitCor = cor(MEs, datTraits, use = "p");
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nSamples);
+```
+
+```{r}
+
+
+#=====================================================================================
+#
+#  Code chunk 3
+#
+#=====================================================================================
+
+
+sizeGrWindow(10,6)
+# Will display correlations and their p-values
+textMatrix =  paste(signif(moduleTraitCor, 2), "\n(",
+                           signif(moduleTraitPvalue, 1), ")", sep = "");
+dim(textMatrix) = dim(moduleTraitCor)
+par(mar = c(6, 8.5, 3, 3));
+# Display the correlation values within a heatmap plot
+labeledHeatmap(Matrix = moduleTraitCor,
+               xLabels = names(datTraits),
+               yLabels = names(MEs),
+               ySymbols = names(MEs),
+               colorLabels = FALSE,
+               colors = greenWhiteRed(50),
+               textMatrix = textMatrix,
+               setStdMargins = FALSE,
+               cex.text = 0.5,
+               zlim = c(-1,1),
+               main = paste("Module-trait relationships"))
+
+```
+
+```{r, eval = FALSE}
+
+#=====================================================================================
+#
+#  Code chunk 4
+#
+#=====================================================================================
+
+
+# Define variable weight containing the weight column of datTrait
+weight = as.data.frame(datTraits$weight_g);
+names(weight) = "weight"
+# names (colors) of the modules
+modNames = substring(names(MEs), 3)
+
+geneModuleMembership = as.data.frame(cor(datExpr, MEs, use = "p"));
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples));
+
+names(geneModuleMembership) = paste("MM", modNames, sep="");
+names(MMPvalue) = paste("p.MM", modNames, sep="");
+
+geneTraitSignificance = as.data.frame(cor(datExpr, weight, use = "p"));
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples));
+
+names(geneTraitSignificance) = paste("GS.", names(weight), sep="");
+names(GSPvalue) = paste("p.GS.", names(weight), sep="");
+
+```
+
+```{r, eval = FALSE}
+
+#=====================================================================================
+#
+#  Code chunk 5
+#
+#=====================================================================================
+
+
+module = "brown"
+column = match(module, modNames);
+moduleGenes = moduleColors==module;
+
+sizeGrWindow(7, 7);
+par(mfrow = c(1,1));
+verboseScatterplot(abs(geneModuleMembership[moduleGenes, column]),
+                   abs(geneTraitSignificance[moduleGenes, 1]),
+                   xlab = paste("Module Membership in", module, "module"),
+                   ylab = "Gene significance for body weight",
+                   main = paste("Module membership vs. gene significance\n"),
+                   cex.main = 1.2, cex.lab = 1.2, cex.axis = 1.2, col = module)
+
+```
+
+
+
+# interface with gene ontology
+
+```{r, eval = FALSE}
+
+
+# $ Choose interesting modules
+intModules = c("brown", "red", "salmon")
+for (module in intModules)
+{
+  # Select module probes
+  modGenes = (moduleColors==module)
+  # Get their entrez ID codes
+  modLLIDs = allLLIDs[modGenes];
+  # Write them into a file
+  fileName = paste("LocusLinkIDs-", module, ".txt", sep="");
+  write.table(as.data.frame(modLLIDs), file = fileName,
+              row.names = FALSE, col.names = FALSE)
+}
+# As background in the enrichment analysis, we will use all probes in the analysis.
+fileName = paste("LocusLinkIDs-all.txt", sep="");
+write.table(as.data.frame(allLLIDs), file = fileName,
+            row.names = FALSE, col.names = FALSE)
+
+
+#=====================================================================================
+#
+#  Code chunk 3
+#
+#=====================================================================================
+
+
+GOenr = GOenrichmentAnalysis(moduleColors, allLLIDs, organism = "human", nBestP = 10);
+
+
+#=====================================================================================
+#
+#  Code chunk 4
+#
+#=====================================================================================
+
+
+tab = GOenr$bestPTerms[[4]]$enrichment
+
+
+#=====================================================================================
+#
+#  Code chunk 5
+#
+#=====================================================================================
+
+
+names(tab)
+
+
+#=====================================================================================
+#
+#  Code chunk 6
+#
+#=====================================================================================
+
+
+write.table(tab, file = "GOEnrichmentTable.csv", sep = ",", quote = TRUE, row.names = FALSE)
+
+
+#=====================================================================================
+#
+#  Code chunk 7
+#
+#=====================================================================================
+
+
+keepCols = c(1, 2, 5, 6, 7, 12, 13);
+screenTab = tab[, keepCols];
+# Round the numeric columns to 2 decimal places:
+numCols = c(3, 4);
+screenTab[, numCols] = signif(apply(screenTab[, numCols], 2, as.numeric), 2)
+# Truncate the the term name to at most 40 characters
+screenTab[, 7] = substring(screenTab[, 7], 1, 40)
+# Shorten the column names:
+colnames(screenTab) = c("module", "size", "p-val", "Bonf", "nInTerm", "ont", "term name");
+rownames(screenTab) = NULL;
+# Set the width of R's output. The reader should play with this number to obtain satisfactory output.
+options(width=95)
+# Finally, display the enrichment table:
+screenTab
+
+
+
+```
+
+# network viz
+
+```{r, eval = FALSE}
+#=====================================================================================
+#
+#  Code chunk 1
+
+nGenes = ncol(datExpr)
+nSamples = nrow(datExpr)
+
+
+#=====================================================================================
+#
+#  Code chunk 2
+#
+#=====================================================================================
+
+
+# Calculate topological overlap anew: this could be done more efficiently by saving the TOM
+# calculated during module detection, but let us do it again here.
+dissTOM = 1-TOMsimilarityFromExpr(datExpr, power = 6);
+# Transform dissTOM with a power to make moderately strong connections more visible in the heatmap
+plotTOM = dissTOM^7;
+# Set diagonal to NA for a nicer plot
+diag(plotTOM) = NA;
+# Call the plot function
+sizeGrWindow(9,9)
+TOMplot(plotTOM, geneTree, moduleColors, main = "Network heatmap plot, all genes")
+
+
+#=====================================================================================
+#
+#  Code chunk 3
+#
+#=====================================================================================
+
+
+nSelect = 400
+# For reproducibility, we set the random seed
+set.seed(10);
+select = sample(nGenes, size = nSelect);
+selectTOM = dissTOM[select, select];
+# There's no simple way of restricting a clustering tree to a subset of genes, so we must re-cluster.
+selectTree = hclust(as.dist(selectTOM), method = "average")
+selectColors = moduleColors[select];
+# Open a graphical window
+sizeGrWindow(9,9)
+# Taking the dissimilarity to a power, say 10, makes the plot more informative by effectively changing 
+# the color palette; setting the diagonal to NA also improves the clarity of the plot
+plotDiss = selectTOM^7;
+diag(plotDiss) = NA;
+TOMplot(plotDiss, selectTree, selectColors, main = "Network heatmap plot, selected genes")
+
+
+#=====================================================================================
+#
+#  Code chunk 4
+#
+#=====================================================================================
+
+
+# Recalculate module eigengenes
+MEs = moduleEigengenes(datExpr, moduleColors)$eigengenes
+# Isolate weight from the clinical traits
+weight = as.data.frame(datTraits$weight_g);
+names(weight) = "weight"
+# Add the weight to existing module eigengenes
+MET = orderMEs(cbind(MEs, weight))
+# Plot the relationships among the eigengenes and the trait
+sizeGrWindow(5,7.5);
+par(cex = 0.9)
+plotEigengeneNetworks(MET, "", marDendro = c(0,4,1,2), marHeatmap = c(3,4,1,2), cex.lab = 0.8, xLabelsAngle
+= 90)
+
+
+#=====================================================================================
+#
+#  Code chunk 5
+#
+#=====================================================================================
+
+
+# Plot the dendrogram
+sizeGrWindow(6,6);
+par(cex = 1.0)
+plotEigengeneNetworks(MET, "Eigengene dendrogram", marDendro = c(0,4,2,0),
+                      plotHeatmaps = FALSE)
+# Plot the heatmap matrix (note: this plot will overwrite the dendrogram plot)
+par(cex = 1.0)
+plotEigengeneNetworks(MET, "Eigengene adjacency heatmap", marHeatmap = c(3,4,2,2),
+                      plotDendrograms = FALSE, xLabelsAngle = 90)
+
+
+
+```
